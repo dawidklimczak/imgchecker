@@ -1,4 +1,6 @@
 import streamlit as st
+st.set_option('server.fileWatcherType', 'none')  # Wyłączenie file watcher, aby uniknąć błędów z Torch
+
 import numpy as np
 import cv2
 from PIL import Image
@@ -6,7 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import rgb2hex
 import easyocr
 
-# Sprawdzenie czy CUDA jest dostępne (dla szybszego OCR)
+# Sprawdzenie, czy CUDA jest dostępne (dla szybszego OCR)
 try:
     import torch
     GPU_AVAILABLE = torch.cuda.is_available()
@@ -15,7 +17,6 @@ except Exception as e:
 
 # Funkcja do obliczenia współczynnika kontrastu WCAG
 def calculate_contrast_ratio(color1, color2):
-    # Konwersja kolorów RGB na luminancję
     def get_luminance(rgb):
         rgb = [c/255 for c in rgb]
         rgb = [c/12.92 if c <= 0.03928 else ((c+0.055)/1.055)**2.4 for c in rgb]
@@ -74,7 +75,7 @@ def detect_text_easyocr(image, reader):
             text_regions.append({
                 'text': text,
                 'bbox': (int(x_min), int(y_min), int(x_max), int(y_max)),
-                'confidence': conf * 100  # Konwersja na skalę procentową
+                'confidence': conf * 100
             })
         
         return text_regions
@@ -130,7 +131,7 @@ def sample_colors_from_region(image, region, num_samples=10):
         background_color = color1  # Większy klaster to tło
         foreground_color = color2  # Mniejszy klaster to tekst
     else:
-        # Gdy nie ma wyraźnego dominanta, stosujemy porównanie luminancji.
+        # Gdy nie ma wyraźnego dominanta, stosujemy porównanie luminancji
         if lum1 > lum2:
             background_color = color1
             foreground_color = color2
@@ -480,7 +481,6 @@ def main():
                                 with col2:
                                     manual_bg = st.color_picker("Skoryguj kolor tła", bg_hex, key=f"manual_bg_{i}")
                                 
-                                # Konwersja HEX do RGB
                                 import re
                                 def hex_to_rgb(hex_color):
                                     hex_color = hex_color.lstrip('#')
