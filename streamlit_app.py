@@ -46,89 +46,48 @@ def check_wcag_compliance(contrast_ratio):
 # Inicjalizacja czytnika EasyOCR (można dodać więcej języków wedle potrzeby)
 @st.cache_resource
 def load_ocr_reader(languages=['pl', 'en']):
-    if not OCR_AVAILABLE:
-        return None
-        
     try:
-        # Dodajemy więcej informacji diagnostycznych
-        st.info("Inicjalizacja EasyOCR... To może potrwać chwilę.")
-        
-        # Na Streamlit Cloud mogą być problemy z GPU, więc wymuszamy CPU
+        # Zawsze używaj CPU w Streamlit Cloud
         reader = easyocr.Reader(languages, gpu=False, verbose=False)
-        st.success("EasyOCR załadowany pomyślnie!")
         return reader
     except Exception as e:
         st.error(f"Błąd podczas inicjalizacji EasyOCR: {e}")
-        import traceback
-        st.error(f"Szczegóły błędu: {traceback.format_exc()}")
         return None
 
 # Funkcja do detekcji tekstu za pomocą EasyOCR
 def detect_text_easyocr(image, reader):
-    if reader is None:
-        # Tryb awaryjny - zwróć kilka przykładowych regionów
-        st.warning("Detekcja tekstu niedostępna - używam trybu awaryjnego z przykładowymi danymi.")
-        height, width = image.shape[:2]
-        
-        # Stwórz przykładowe regiony tekstowe w różnych miejscach obrazu
-        # Ten kod działa tylko w trybie awaryjnym gdy OCR jest niedostępny
-        example_regions = [
-            {
-                'text': 'Przykładowy tekst 1',
-                'bbox': (int(width*0.1), int(height*0.1), int(width*0.3), int(height*0.15)),
-                'confidence': 95.0
-            },
-            {
-                'text': 'Przykładowy tekst 2',
-                'bbox': (int(width*0.5), int(height*0.5), int(width*0.8), int(height*0.55)),
-                'confidence': 90.0
-            },
-            {
-                'text': 'Tekst przy krawędzi',
-                'bbox': (int(width*0.05), int(height*0.8), int(width*0.3), int(height*0.85)),
-                'confidence': 85.0
-            }
-        ]
-        return example_regions
-    
     try:
-        with st.spinner("Analizuję tekst na obrazie..."):
-            # Konwersja obrazu do formatu wymaganego przez EasyOCR
-            if isinstance(image, Image.Image):
-                # Konwersja obrazu PIL do tablicy numpy
-                img_array = np.array(image)
-                # Konwersja RGB do BGR (jeśli potrzebna)
-                if len(img_array.shape) == 3 and img_array.shape[2] == 3:
-                    img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-            else:
-                img_array = image
+        # Konwersja obrazu do formatu wymaganego przez EasyOCR
+        if isinstance(image, Image.Image):
+            # Konwersja obrazu PIL do tablicy numpy
+            img_array = np.array(image)
+            # Konwersja RGB do BGR (jeśli potrzebna)
+            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        else:
+            img_array = image
+        
+        # Wykonaj detekcję tekstu
+        results = reader.readtext(img_array)
+        
+        text_regions = []
+        for i, (bbox, text, conf) in enumerate(results):
+            # EasyOCR zwraca cztery punkty prostokąta [tl, tr, br, bl]
+            # Konwersja do formatu (x, y, x+w, y+h)
+            x_min = min(point[0] for point in bbox)
+            y_min = min(point[1] for point in bbox)
+            x_max = max(point[0] for point in bbox)
+            y_max = max(point[1] for point in bbox)
             
-            # Wykonaj detekcję tekstu
-            st.info("Detekcja tekstu w toku... To może potrwać chwilę.")
-            results = reader.readtext(img_array)
-            
-            text_regions = []
-            for i, (bbox, text, conf) in enumerate(results):
-                # EasyOCR zwraca cztery punkty prostokąta [tl, tr, br, bl]
-                # Konwersja do formatu (x, y, x+w, y+h)
-                x_min = min(point[0] for point in bbox)
-                y_min = min(point[1] for point in bbox)
-                x_max = max(point[0] for point in bbox)
-                y_max = max(point[1] for point in bbox)
-                
-                text_regions.append({
-                    'text': text,
-                    'bbox': (int(x_min), int(y_min), int(x_max), int(y_max)),
-                    'confidence': conf * 100  # Konwersja na skalę procentową
-                })
-            
-            return text_regions
+            text_regions.append({
+                'text': text,
+                'bbox': (int(x_min), int(y_min), int(x_max), int(y_max)),
+                'confidence': conf * 100  # Konwersja na skalę procentową
+            })
+        
+        return text_regions
     except Exception as e:
         st.error(f"Błąd podczas detekcji tekstu: {e}")
-        import traceback
-        st.error(f"Szczegóły błędu: {traceback.format_exc()}")
-        
-        # Zwróć pusty wynik w przypadku błędu
         return []
 
 # NOWE PODEJŚCIE: Pobieranie i analiza kolorów z próbek
@@ -390,29 +349,16 @@ def visualize_results(original_image, regions_with_analysis, margin_h_px, margin
 def main():
     st.title("Analiza Dostępności Grafiki - WCAG")
     
-    # Informacja o trybie działania aplikacji
-    if not OCR_AVAILABLE:
-        st.warning("""
-        ⚠️ **Aplikacja działa w trybie podstawowym bez rozpoznawania tekstu!**
-        
-        EasyOCR nie jest dostępny w tym środowisku. Będziemy używać przykładowych danych do demonstracji.
-        Aby korzystać z pełnych funkcji, uruchom aplikację lokalnie.
-        """)
-    
     # Sidebar z opcjami
     st.sidebar.header("Opcje analizy")
     
-    # Opcje języka dla OCR (aktywne tylko jeśli OCR jest dostępny)
-    if OCR_AVAILABLE:
-        languages = st.sidebar.multiselect(
-            "Języki OCR",
-            options=["pl", "en", "de", "fr", "es", "it"],
-            default=["pl", "en"],
-            key="ocr_languages"
-        )
-    else:
-        st.sidebar.info("Wybór języków OCR niedostępny w trybie podstawowym")
-        languages = ["pl", "en"]  # Domyślne języki w trybie awaryjnym
+    # Opcje języka dla OCR
+    languages = st.sidebar.multiselect(
+        "Języki OCR",
+        options=["pl", "en", "de", "fr", "es", "it"],
+        default=["pl", "en"],
+        key="ocr_languages"
+    )
     
     # Ustawienia marginesów
     st.sidebar.subheader("Bezpieczny obszar")
@@ -462,33 +408,18 @@ def main():
         regions = []
         
         # Automatyczne wykrywanie tekstu
-        try:
-            if OCR_AVAILABLE:
-                with st.spinner("Inicjalizacja EasyOCR i wykrywanie tekstu..."):
-                    # Inicjalizacja czytnika OCR
-                    reader = load_ocr_reader(languages)
-                    
-                    if reader:
-                        # Wykrywanie tekstu
-                        regions = detect_text_easyocr(cv_image, reader)
-                        
-                        if not regions:
-                            st.warning("Nie wykryto tekstu. Sprawdź czy obraz zawiera wyraźny tekst.")
-                    else:
-                        st.error("Nie udało się zainicjalizować EasyOCR.")
-                        # W przypadku problemów z inicjalizacją, użyj trybu awaryjnego
-                        regions = detect_text_easyocr(cv_image, None)
-            else:
-                # Tryb awaryjny - użyj funkcji bez czytnika OCR
-                st.info("Używam trybu awaryjnego z przykładowymi danymi.")
-                regions = detect_text_easyocr(cv_image, None)
-        except Exception as e:
-            st.error(f"Wystąpił nieoczekiwany błąd: {e}")
-            import traceback
-            st.error(f"Szczegóły: {traceback.format_exc()}")
+        with st.spinner("Inicjalizacja EasyOCR i wykrywanie tekstu..."):
+            # Inicjalizacja czytnika OCR
+            reader = load_ocr_reader(languages)
             
-            # W przypadku awarii, użyj trybu awaryjnego
-            regions = detect_text_easyocr(cv_image, None)
+            if reader:
+                # Wykrywanie tekstu
+                regions = detect_text_easyocr(cv_image, reader)
+                
+                if not regions:
+                    st.warning("Nie wykryto tekstu. Sprawdź czy obraz zawiera wyraźny tekst.")
+            else:
+                st.error("Nie udało się zainicjalizować EasyOCR.")
         
         # Analiza i wizualizacja wyników
         if regions:
@@ -496,21 +427,17 @@ def main():
                 regions_with_analysis = []
                 
                 for region in regions:
-                    try:
-                        # Analizuj kolory używając nowego podejścia
-                        color_data = sample_colors_from_region(cv_image, region)
-                        
-                        # Sprawdź odległość od krawędzi
-                        edge_data = check_edge_distance(cv_image.shape, region, margin_h_px, margin_v_px)
-                        
-                        regions_with_analysis.append({
-                            'region': region,
-                            'colors': color_data,
-                            'edge': edge_data
-                        })
-                    except Exception as e:
-                        st.error(f"Błąd podczas analizy regionu: {region['text']}, Error: {e}")
-                        # Kontynuuj analizę pozostałych regionów
+                    # Analizuj kolory używając nowego podejścia
+                    color_data = sample_colors_from_region(cv_image, region)
+                    
+                    # Sprawdź odległość od krawędzi
+                    edge_data = check_edge_distance(cv_image.shape, region, margin_h_px, margin_v_px)
+                    
+                    regions_with_analysis.append({
+                        'region': region,
+                        'colors': color_data,
+                        'edge': edge_data
+                    })
                 
                 # Wizualizuj wyniki z bezpiecznym obszarem i nowym podejściem do kolorów
                 result_image = visualize_results(cv_image, regions_with_analysis, margin_h_px, margin_v_px)
