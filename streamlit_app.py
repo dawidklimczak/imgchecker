@@ -1,6 +1,4 @@
 import streamlit as st
-st.set_option('server.fileWatcherType', 'none')  # Wyłączenie file watcher, aby uniknąć błędów z Torch
-
 import numpy as np
 import cv2
 from PIL import Image
