@@ -566,3 +566,5 @@ def show_safety_margin(image, margin_h_px, margin_v_px):
 
 if __name__ == "__main__":
     main()
+
+    
