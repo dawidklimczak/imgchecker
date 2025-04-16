@@ -1,3 +1,2 @@
 [server]
 fileWatcherType = "none"
-scriptHealthCheckTimeout = 300
