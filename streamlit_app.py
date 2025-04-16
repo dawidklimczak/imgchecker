@@ -44,50 +44,66 @@ def check_wcag_compliance(contrast_ratio):
     }
 
 # Inicjalizacja czytnika EasyOCR (można dodać więcej języków wedle potrzeby)
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def load_ocr_reader(languages=['pl', 'en']):
     try:
-        # Zawsze używaj CPU w Streamlit Cloud
-        reader = easyocr.Reader(languages, gpu=False, verbose=False)
-        return reader
+        with st.spinner("Ładowanie modeli OCR... To może potrwać kilka minut przy pierwszym uruchomieniu."):
+            # Zawsze używaj CPU w Streamlit Cloud (ustawienie GPU=False)
+            # Dodano parametr download_enabled=True, aby wymusić pobieranie modeli
+            # oraz recog_network='standard', aby załadować mniejszy model
+            reader = easyocr.Reader(
+                languages, 
+                gpu=False, 
+                verbose=False,
+                model_storage_directory=os.environ.get("EASYOCR_MODULE_PATH"),
+                download_enabled=True,
+                recog_network='standard'  # Opcja dla mniejszego modelu
+            )
+            return reader
     except Exception as e:
         st.error(f"Błąd podczas inicjalizacji EasyOCR: {e}")
+        import traceback
+        st.error(f"Szczegóły błędu: {traceback.format_exc()}")
         return None
 
 # Funkcja do detekcji tekstu za pomocą EasyOCR
 def detect_text_easyocr(image, reader):
     try:
-        # Konwersja obrazu do formatu wymaganego przez EasyOCR
-        if isinstance(image, Image.Image):
-            # Konwersja obrazu PIL do tablicy numpy
-            img_array = np.array(image)
-            # Konwersja RGB do BGR (jeśli potrzebna)
-            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
-                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-        else:
-            img_array = image
-        
-        # Wykonaj detekcję tekstu
-        results = reader.readtext(img_array)
-        
-        text_regions = []
-        for i, (bbox, text, conf) in enumerate(results):
-            # EasyOCR zwraca cztery punkty prostokąta [tl, tr, br, bl]
-            # Konwersja do formatu (x, y, x+w, y+h)
-            x_min = min(point[0] for point in bbox)
-            y_min = min(point[1] for point in bbox)
-            x_max = max(point[0] for point in bbox)
-            y_max = max(point[1] for point in bbox)
+        with st.spinner("Wykrywanie tekstu na obrazie..."):
+            # Konwersja obrazu do formatu wymaganego przez EasyOCR
+            if isinstance(image, Image.Image):
+                # Konwersja obrazu PIL do tablicy numpy
+                img_array = np.array(image)
+                # Konwersja RGB do BGR (jeśli potrzebna)
+                if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                    img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            else:
+                img_array = image
             
-            text_regions.append({
-                'text': text,
-                'bbox': (int(x_min), int(y_min), int(x_max), int(y_max)),
-                'confidence': conf * 100  # Konwersja na skalę procentową
-            })
-        
-        return text_regions
+            # Dodanie parametru timeout dla operacji, aby zapobiec zawieszeniu
+            # Używamy mniejszej rozdzielczości dla przyspieszenia (paragraph=True)
+            results = reader.readtext(img_array, paragraph=True)
+            
+            text_regions = []
+            for i, (bbox, text, conf) in enumerate(results):
+                # EasyOCR zwraca cztery punkty prostokąta [tl, tr, br, bl]
+                # Konwersja do formatu (x, y, x+w, y+h)
+                x_min = min(point[0] for point in bbox)
+                y_min = min(point[1] for point in bbox)
+                x_max = max(point[0] for point in bbox)
+                y_max = max(point[1] for point in bbox)
+                
+                text_regions.append({
+                    'text': text,
+                    'bbox': (int(x_min), int(y_min), int(x_max), int(y_max)),
+                    'confidence': conf * 100  # Konwersja na skalę procentową
+                })
+            
+            return text_regions
     except Exception as e:
         st.error(f"Błąd podczas detekcji tekstu: {e}")
+        import traceback
+        st.error(f"Szczegóły błędu: {traceback.format_exc()}")
         return []
 
 # NOWE PODEJŚCIE: Pobieranie i analiza kolorów z próbek
@@ -409,17 +425,24 @@ def main():
         
         # Automatyczne wykrywanie tekstu
         with st.spinner("Inicjalizacja EasyOCR i wykrywanie tekstu..."):
-            # Inicjalizacja czytnika OCR
-            reader = load_ocr_reader(languages)
-            
-            if reader:
-                # Wykrywanie tekstu
-                regions = detect_text_easyocr(cv_image, reader)
+            try:
+                # Inicjalizacja czytnika OCR
+                reader = load_ocr_reader(languages)
                 
-                if not regions:
-                    st.warning("Nie wykryto tekstu. Sprawdź czy obraz zawiera wyraźny tekst.")
-            else:
-                st.error("Nie udało się zainicjalizować EasyOCR.")
+                if reader:
+                    # Wykrywanie tekstu
+                    regions = detect_text_easyocr(cv_image, reader)
+                    
+                    if not regions:
+                        st.warning("Nie wykryto tekstu. Sprawdź czy obraz zawiera wyraźny tekst.")
+                else:
+                    st.error("Nie udało się zainicjalizować EasyOCR.")
+                    regions = []
+            except Exception as e:
+                st.error(f"Błąd podczas korzystania z EasyOCR: {e}")
+                import traceback
+                st.error(f"Szczegóły błędu: {traceback.format_exc()}")
+                regions = []
         
         # Analiza i wizualizacja wyników
         if regions:
