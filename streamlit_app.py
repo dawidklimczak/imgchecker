@@ -4,13 +4,109 @@ import cv2
 from PIL import Image
 import matplotlib.pyplot as plt
 from matplotlib.colors import rgb2hex
-import easyocr
-
-# Sprawdzenie czy CUDA jest dostępne (dla szybszego OCR)
-# Używamy zmiennej środowiskowej, aby uniknąć problemów z śledzeniem modułów
+from sklearn.cluster import KMeans
 import os
-os.environ["PYTORCH_JIT"] = "0"  # Wyłączenie JIT, które może powodować problemy
-GPU_AVAILABLE = False  # Domyślnie przyjmujemy, że GPU nie jest dostępne na Streamlit Cloud
+import time
+
+# Ustaw zmienną środowiskową dla czasowego katalogu modeli
+os.environ["FLAGS_allocator_strategy"] = 'auto_growth'  # Optymalizacja pamięci dla PaddleOCR
+
+# Inicjalizacja czytnika PaddleOCR z użyciem cache
+@st.cache_resource(show_spinner=False)
+def load_ocr_reader(languages=['pl', 'en']):
+    """
+    Próbuje załadować czytnik PaddleOCR. Zwraca None w przypadku niepowodzenia.
+    """
+    try:
+        with st.spinner("Ładowanie modeli OCR... To może potrwać chwilę przy pierwszym uruchomieniu."):
+            # Importujemy paddleocr wewnątrz funkcji
+            from paddleocr import PaddleOCR
+            
+            # Mapowanie języków do kodów używanych przez PaddleOCR
+            lang_map = {
+                'en': 'en',
+                'pl': 'pl',
+                'de': 'de',
+                'fr': 'fr',
+                'es': 'es',
+                'it': 'it'
+            }
+            
+            # Wybieramy pierwszy dostępny język lub domyślnie angielski
+            lang = next((lang_map[l] for l in languages if l in lang_map), 'en')
+            
+            # Inicjalizacja PaddleOCR z lekkim modelem
+            ocr = PaddleOCR(
+                use_angle_cls=True,  # Wykrywanie orientacji tekstu
+                lang=lang,           # Język rozpoznawania
+                use_gpu=False,       # Brak GPU w Streamlit Cloud
+                show_log=False,      # Wyłączenie logów
+                use_mp=True,         # Wielowątkowość dla szybszego przetwarzania
+                enable_mkldnn=True,  # Optymalizacja CPU
+                use_tensorrt=False,  # Wyłączenie TensorRT (nie jest dostępne w Streamlit Cloud)
+                cpu_threads=4        # Liczba wątków CPU
+            )
+            return ocr
+    except Exception as e:
+        st.error(f"Błąd podczas inicjalizacji PaddleOCR: {e}")
+        import traceback
+        st.error(traceback.format_exc())
+        return None
+
+# Funkcja do detekcji tekstu za pomocą PaddleOCR
+def detect_text_paddleocr(image, ocr):
+    """
+    Wykrywa tekst na obrazie za pomocą PaddleOCR.
+    """
+    # Sprawdzamy czy czytnik OCR jest dostępny
+    if ocr is None:
+        st.warning("Rozpoznawanie tekstu nie jest dostępne.")
+        return []
+    
+    try:
+        # Konwersja obrazu do formatu wymaganego przez PaddleOCR
+        if isinstance(image, Image.Image):
+            img_array = np.array(image)
+        else:
+            img_array = image
+        
+        # Detekcja tekstu
+        with st.spinner("Wykrywanie tekstu na obrazie..."):
+            results = ocr.ocr(img_array, cls=True)
+            
+            # Przetwarzamy wyniki
+            text_regions = []
+            
+            # PaddleOCR zwraca wyniki dla każdej strony (zwykle jednej)
+            for page_result in results:
+                if not page_result:  # Pusta strona
+                    continue
+                    
+                for result in page_result:
+                    # PaddleOCR zwraca [[x1,y1], [x2,y2], [x3,y3], [x4,y4]], tekst, pewność
+                    box = result[0]
+                    text = result[1][0]  # Tekst
+                    confidence = result[1][1] * 100  # Pewność w procentach
+                    
+                    # Konwersja do formatu (x, y, x+w, y+h)
+                    x_min = min(point[0] for point in box)
+                    y_min = min(point[1] for point in box)
+                    x_max = max(point[0] for point in box)
+                    y_max = max(point[1] for point in box)
+                    
+                    text_regions.append({
+                        'text': text,
+                        'bbox': (int(x_min), int(y_min), int(x_max), int(y_max)),
+                        'confidence': confidence
+                    })
+            
+            return text_regions
+            
+    except Exception as e:
+        st.error(f"Błąd podczas detekcji tekstu: {e}")
+        import traceback
+        st.error(traceback.format_exc())
+        return []
 
 # Funkcja do obliczenia współczynnika kontrastu WCAG
 def calculate_contrast_ratio(color1, color2):
@@ -43,78 +139,6 @@ def check_wcag_compliance(contrast_ratio):
         'AAA_large': aaa_large_text
     }
 
-# Inicjalizacja czytnika EasyOCR z obsługą awarii
-@st.cache_resource
-def load_ocr_reader(languages=['pl', 'en']):
-    if not EASYOCR_AVAILABLE:
-        if DEBUG_MODE:
-            st.warning("EasyOCR nie jest dostępny. Funkcja rozpoznawania tekstu nie będzie działać.")
-        return None
-        
-    try:
-        # Próbujemy zainicjalizować czytnik z minimalnymi parametrami
-        reader = easyocr.Reader(
-            languages, 
-            gpu=False,            # Wyłączenie GPU
-            verbose=False,        # Wyłączenie komunikatów
-            quantize=True,        # Redukcja rozmiaru modeli
-            cudnn_benchmark=False # Wyłączenie optymalizacji CUDA
-        )
-        return reader
-    except Exception as e:
-        if DEBUG_MODE:
-            st.error(f"Nie udało się zainicjalizować EasyOCR: {e}")
-        return None
-
-# Funkcja do detekcji tekstu za pomocą EasyOCR lub obsługi błędów
-def detect_text_easyocr(image, reader):
-    # Sprawdzamy czy czytnik EasyOCR jest dostępny
-    if reader is None:
-        if DEBUG_MODE:
-            st.warning("Rozpoznawanie tekstu nie jest dostępne.")
-        return []
-    
-    try:
-        # Konwersja obrazu do formatu wymaganego przez EasyOCR
-        if isinstance(image, Image.Image):
-            img_array = np.array(image)
-            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
-                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-        else:
-            img_array = image
-        
-        # Detekcja tekstu z obsługą błędów
-        text_regions = []
-        
-        # Próbujemy wykonać detekcję z minimalnymi parametrami
-        results = reader.readtext(
-            img_array,
-            detail=1,           # Pełne szczegóły wykrytego tekstu
-            paragraph=True,     # Grupowanie tekstu w paragrafy (szybsze)
-            height_ths=0.5,     # Wyższy próg dla łączenia linii (mniej wyników)
-            width_ths=0.5,      # Wyższy próg dla łączenia znaków (mniej wyników)
-            decoder='greedy'    # Najszybszy dekoder
-        )
-        
-        # Przetwarzamy wyniki
-        for i, (bbox, text, conf) in enumerate(results):
-            x_min = min(point[0] for point in bbox)
-            y_min = min(point[1] for point in bbox)
-            x_max = max(point[0] for point in bbox)
-            y_max = max(point[1] for point in bbox)
-            
-            text_regions.append({
-                'text': text,
-                'bbox': (int(x_min), int(y_min), int(x_max), int(y_max)),
-                'confidence': conf * 100
-            })
-        
-        return text_regions
-    except Exception as e:
-        if DEBUG_MODE:
-            st.error(f"Błąd podczas detekcji tekstu: {e}")
-        return []
-
 # NOWE PODEJŚCIE: Pobieranie i analiza kolorów z próbek
 def sample_colors_from_region(image, region, num_samples=10):
     """Pobiera próbki kolorów z różnych części regionu i analizuje je statystycznie."""
@@ -145,7 +169,6 @@ def sample_colors_from_region(image, region, num_samples=10):
     pixels = region_rgb.reshape(-1, 3)
     
     # Proste podejście klastrujące - znajdź dwa główne klastry kolorów
-    from sklearn.cluster import KMeans
     km = KMeans(n_clusters=2, random_state=42)
     km.fit(pixels)
     
@@ -370,129 +393,6 @@ def visualize_results(original_image, regions_with_analysis, margin_h_px, margin
         st.error(f"Błąd podczas wizualizacji wyników: {e}")
         return original_image
 
-# Główna aplikacja Streamlit
-def main():
-    st.title("Analiza Dostępności Grafiki - WCAG")
-    
-    # Sidebar z opcjami
-    st.sidebar.header("Opcje analizy")
-    
-    # Opcje języka dla OCR (tylko jeśli EasyOCR jest dostępny)
-    if EASYOCR_AVAILABLE:
-        languages = st.sidebar.multiselect(
-            "Języki OCR",
-            options=["pl", "en", "de", "fr", "es", "it"],
-            default=["pl", "en"],
-            key="ocr_languages"
-        )
-    else:
-        languages = ["pl", "en"]  # Domyślne języki
-        if DEBUG_MODE:
-            st.sidebar.warning("EasyOCR nie jest dostępny. Wybór języków został wyłączony.")
-    
-    
-    # Ustawienia marginesów
-    st.sidebar.subheader("Bezpieczny obszar")
-    
-    # Domyślny margines 10% dla szerokości i wysokości
-    margin_h_percent = st.sidebar.slider(
-        "Margines poziomy (%)",
-        1, 25, 10,
-        help="Minimalny odstęp od lewej i prawej krawędzi jako procent szerokości obrazu",
-        key="margin_h_slider"
-    )
-    
-    margin_v_percent = st.sidebar.slider(
-        "Margines pionowy (%)",
-        1, 25, 10,
-        help="Minimalny odstęp od górnej i dolnej krawędzi jako procent wysokości obrazu",
-        key="margin_v_slider"
-    )
-    
-    # Upload pliku
-    uploaded_file = st.file_uploader("Wybierz plik graficzny", type=["png", "jpg", "jpeg"], key="file_uploader")
-    
-    if uploaded_file is not None:
-        # Wczytaj obraz
-        pil_image = Image.open(uploaded_file)
-        
-        # Konwersja do formatu OpenCV (BGR)
-        cv_image = np.array(pil_image)
-        if len(cv_image.shape) == 2:  # Jeśli obraz jest w skali szarości
-            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_GRAY2BGR)
-        elif len(cv_image.shape) == 3 and cv_image.shape[2] == 4:  # Jeśli obraz ma kanał alfa (RGBA)
-            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGBA2BGR)
-        elif len(cv_image.shape) == 3 and cv_image.shape[2] == 3:  # RGB
-            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
-        
-        # Wyświetl oryginalny obraz
-        st.image(pil_image, caption="Wgrana grafika", use_container_width=True)
-        
-        # Oblicz marginesy w pikselach na podstawie wymiarów obrazu
-        height, width = cv_image.shape[:2]
-        margin_h_px = int((width * margin_h_percent) / 100)
-        margin_v_px = int((height * margin_v_percent) / 100)
-        
-        # Wyświetl informację o marginesach
-        st.info(f"Bezpieczny obszar: margines poziomy {margin_h_percent}% ({margin_h_px}px), margines pionowy {margin_v_percent}% ({margin_v_px}px)")
-        
-        regions = []
-        
-        # Automatyczne wykrywanie tekstu
-        reader = None
-        regions = []
-        
-        # Inicjalizacja czytnika OCR tylko jeśli EasyOCR jest dostępny
-        if EASYOCR_AVAILABLE:
-            with st.spinner("Inicjalizacja EasyOCR i wykrywanie tekstu..."):
-                try:
-                    reader = load_ocr_reader(languages)
-                    
-                    if reader:
-                        # Wykrywanie tekstu
-                        regions = detect_text_easyocr(cv_image, reader)
-                        
-                        if not regions:
-                            st.warning("Nie wykryto tekstu. Sprawdź czy obraz zawiera wyraźny tekst.")
-                    elif DEBUG_MODE:
-                        st.error("Nie udało się zainicjalizować EasyOCR.")
-                except Exception as e:
-                    if DEBUG_MODE:
-                        st.error(f"Błąd podczas korzystania z EasyOCR: {e}")
-        elif DEBUG_MODE:
-            st.warning("EasyOCR nie jest dostępny. Funkcja rozpoznawania tekstu jest wyłączona.")
-        
-        # Sprawdzanie czy mamy regiony tekstu do analizy
-        if regions:
-            with st.spinner("Analiza obszarów..."):
-                regions_with_analysis = []
-                
-                for region in regions:
-                    # Analizuj kolory używając nowego podejścia
-                    color_data = sample_colors_from_region(cv_image, region)
-                    
-                    # Sprawdź odległość od krawędzi
-                    edge_data = check_edge_distance(cv_image.shape, region, margin_h_px, margin_v_px)
-                    
-                    regions_with_analysis.append({
-                        'region': region,
-                        'colors': color_data,
-                        'edge': edge_data
-                    })
-                
-                # Wizualizuj wyniki z bezpiecznym obszarem i nowym podejściem do kolorów
-                result_image = visualize_results(cv_image, regions_with_analysis, margin_h_px, margin_v_px)
-                
-                # Wyświetl wyniki
-                st.subheader("Wyniki analizy")
-                st.image(result_image, caption="Analiza dostępności", use_container_width=True)
-                
-                # Reszta kodu do wyświetlania wyników...
-                show_analysis_results(regions_with_analysis, margin_h_percent, margin_v_percent, margin_h_px, margin_v_px)
-        else:
-            # Jeśli nie mamy regionów tekstu, ale chcemy nadal pokazać margines bezpieczeństwa
-            show_safety_margin(cv_image, margin_h_px, margin_v_px)
-                
 # Nowa funkcja do wyświetlania tylko marginesu bezpieczeństwa
 def show_safety_margin(image, margin_h_px, margin_v_px):
     """Wyświetla obraz z zaznaczonym marginesem bezpieczeństwa, bez analizy tekstu."""
@@ -560,9 +460,389 @@ def show_safety_margin(image, margin_h_px, margin_v_px):
         st.warning("Nie znaleziono tekstu na obrazie lub funkcja wykrywania tekstu jest niedostępna.")
         
     except Exception as e:
-        if DEBUG_MODE:
-            st.error(f"Błąd podczas wizualizacji strefy bezpiecznej: {e}")
+        st.error(f"Błąd podczas wizualizacji strefy bezpiecznej: {e}")
         st.image(image, caption="Oryginalna grafika", use_container_width=True)
+
+# Funkcja do wyświetlania analizy
+def show_analysis_results(regions_with_analysis, margin_h_percent, margin_v_percent, margin_h_px, margin_v_px):
+    # Wyświetl legendę
+    st.markdown("""
+    **Legenda:**
+    - **Ciemniejszy obszar** - Strefa marginesu (unikaj umieszczania tam treści)
+    - **Jaśniejszy obszar** - Strefa bezpieczna dla treści
+    - **Zielona ramka** - Element zgodny z WCAG AAA
+    - **Niebieska ramka** - Element zgodny z WCAG AA, ale nie z AAA
+    - **Czerwona ramka** - Element niezgodny z WCAG AA
+    """)
+    
+    # Wyświetl szczegóły analizy
+    st.subheader("Podsumowanie wyników")
+    
+    # Style dla kart z danymi
+    st.markdown("""
+    <style>
+    .metric-card {
+        background-color: #262730;
+        border-radius: 6px;
+        padding: 20px;
+        margin-bottom: 10px;
+        border: 1px solid #4B5563;
+    }
+    .metric-value {
+        font-size: 24px;
+        font-weight: bold;
+        color: #FFFFFF;
+    }
+    .metric-label {
+        font-size: 14px;
+        color: #E0E0E0;
+        margin-top: 5px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    valid_color_results = [r for r in regions_with_analysis if r['colors'] is not None]
+    
+    aa_pass = sum(1 for r in valid_color_results if r['colors']['compliance']['AA_normal'])
+    aa_fail = len(valid_color_results) - aa_pass
+    aa_percent = (aa_pass / len(valid_color_results) * 100) if len(valid_color_results) > 0 else 0
+    
+    aaa_pass = sum(1 for r in valid_color_results if r['colors']['compliance']['AAA_normal'])
+    aaa_fail = len(valid_color_results) - aaa_pass
+    aaa_percent = (aaa_pass / len(valid_color_results) * 100) if len(valid_color_results) > 0 else 0
+    
+    outside_safe_area = sum(1 for r in regions_with_analysis if not r['edge']['is_inside_safe_area'])
+    outside_percent = (outside_safe_area / len(regions_with_analysis) * 100) if len(regions_with_analysis) > 0 else 0
+    
+    # Podsumowanie
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{aa_pass}/{len(valid_color_results)} ({aa_percent:.1f}%)</div>
+            <div class="metric-label">WCAG AA (normalny tekst)</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{aaa_pass}/{len(valid_color_results)} ({aaa_percent:.1f}%)</div>
+            <div class="metric-label">WCAG AAA (normalny tekst)</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{outside_safe_area}/{len(regions_with_analysis)} ({outside_percent:.1f}%)</div>
+            <div class="metric-label">Elementy poza strefą bezpieczną</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Tabela ze szczegółami
+    st.subheader("Szczegółowe wyniki")
+    
+    # Zakładki dla przejrzystości
+    tabs = st.tabs(["Wszystkie elementy", "Problemy z kontrastem", "Elementy poza strefą bezpieczną"])
+    
+    # Zakładka wszystkich elementów
+    with tabs[0]:
+        for i, region_data in enumerate(regions_with_analysis):
+            region = region_data['region']
+            color_data = region_data['colors']
+            edge_data = region_data['edge']
+            
+            status_icon = "✅" if (color_data and color_data['compliance']['AA_normal'] and edge_data['is_inside_safe_area']) else "❌"
+            
+            with st.expander(f"{status_icon} Element {i+1}: {region['text']}", key=f"expander_all_{i}"):
+                # Dodaj opcję ręcznej korekty kolorów
+                if color_data:
+                    # Kolorowa ramka dla wartości kontrastu
+                    contrast_color = "green" if color_data['compliance']['AAA_normal'] else ("blue" if color_data['compliance']['AA_normal'] else "red")
+                    st.markdown(f"""
+                    <div style="padding: 10px; border-left: 4px solid {contrast_color}; background-color: #262730; margin-bottom: 10px;">
+                        <strong style="color: white;">Współczynnik kontrastu:</strong> <span style="font-size: 16px; font-weight: bold; color: white;">{color_data['contrast_ratio']:.2f}</span>
+                        <br><span style="font-size: 13px; color: #E0E0E0;">Minimum dla WCAG AA: 4.5, dla WCAG AAA: 7.0</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Tabela zgodności
+                    st.markdown("""
+                    <table style="width:100%; border-collapse: collapse; margin-bottom: 15px; color: white;">
+                        <tr style="background-color: #333;">
+                            <th style="padding: 8px; text-align: left; border: 1px solid #555;">Poziom WCAG</th>
+                            <th style="padding: 8px; text-align: left; border: 1px solid #555;">Normalny tekst</th>
+                            <th style="padding: 8px; text-align: left; border: 1px solid #555;">Duży tekst</th>
+                        </tr>
+                    """, unsafe_allow_html=True)
+                    
+                    aa_normal = "✅" if color_data['compliance']['AA_normal'] else "❌"
+                    aa_large = "✅" if color_data['compliance']['AA_large'] else "❌"
+                    aaa_normal = "✅" if color_data['compliance']['AAA_normal'] else "❌"
+                    aaa_large = "✅" if color_data['compliance']['AAA_large'] else "❌"
+                    
+                    st.markdown(f"""
+                        <tr>
+                            <td style="padding: 8px; border: 1px solid #555;">WCAG AA</td>
+                            <td style="padding: 8px; border: 1px solid #555;">{aa_normal}</td>
+                            <td style="padding: 8px; border: 1px solid #555;">{aa_large}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px; border: 1px solid #555;">WCAG AAA</td>
+                            <td style="padding: 8px; border: 1px solid #555;">{aaa_normal}</td>
+                            <td style="padding: 8px; border: 1px solid #555;">{aaa_large}</td>
+                        </tr>
+                    </table>
+                    """, unsafe_allow_html=True)
+                    
+                    # Wizualizacja wykrytych kolorów
+                    st.markdown("<div style='color: white;'><strong>Wykryte kolory:</strong></div>", unsafe_allow_html=True)
+                    
+                    fg_color = color_data['foreground']
+                    bg_color = color_data['background']
+                    # Konwersja z RGB na HEX
+                    fg_hex = rgb2hex([c/255 for c in fg_color])
+                    bg_hex = rgb2hex([c/255 for c in bg_color])
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown(f"<div style='color: white;'>Kolor tekstu: {fg_hex}</div>", unsafe_allow_html=True)
+                        st.markdown(f'<div style="background-color:{fg_hex};width:50px;height:50px;border:1px solid #555;"></div>', unsafe_allow_html=True)
+                    with col2:
+                        st.markdown(f"<div style='color: white;'>Kolor tła: {bg_hex}</div>", unsafe_allow_html=True)
+                        st.markdown(f'<div style="background-color:{bg_hex};width:50px;height:50px;border:1px solid #555;"></div>', unsafe_allow_html=True)
+                    
+                    # Ręczna korekta kolorów
+                    st.markdown("<div style='color: white;'><strong>Ręczna korekta kolorów:</strong></div>", unsafe_allow_html=True)
+                    
+                    # Użyj color pickerów do ręcznej korekty
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        manual_fg = st.color_picker("Skoryguj kolor tekstu", fg_hex, key=f"fg_{i}")
+                    with col2:
+                        manual_bg = st.color_picker("Skoryguj kolor tła", bg_hex, key=f"bg_{i}")
+                    
+                    # Oblicz nowy kontrast dla ręcznie skorygowanych kolorów
+                    # Konwersja z HEX do RGB
+                    import re
+                    def hex_to_rgb(hex_color):
+                        hex_color = hex_color.lstrip('#')
+                        return [int(hex_color[i:i+2], 16) for i in (0, 2, 4)]
+                    
+                    manual_fg_rgb = hex_to_rgb(manual_fg)
+                    manual_bg_rgb = hex_to_rgb(manual_bg)
+                    
+                    manual_contrast_ratio = calculate_contrast_ratio(manual_fg_rgb, manual_bg_rgb)
+                    manual_compliance = check_wcag_compliance(manual_contrast_ratio)
+                    
+                    if manual_fg != fg_hex or manual_bg != bg_hex:
+                        st.markdown(f"""
+                        <div style="padding: 10px; background-color: #262730; margin: 15px 0; border: 1px solid #555;">
+                            <strong style="color: white;">Skorygowany kontrast:</strong> <span style="font-size: 16px; font-weight: bold; color: white;">{manual_contrast_ratio:.2f}</span>
+                            <br><span style="color: white;">WCAG AA (normalny tekst): {'✅' if manual_compliance['AA_normal'] else '❌'}</span>
+                            <br><span style="color: white;">WCAG AAA (normalny tekst): {'✅' if manual_compliance['AAA_normal'] else '❌'}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.markdown("<div style='color: white;'><strong>Nie udało się wykryć kolorów dla tego elementu.</strong></div>", unsafe_allow_html=True)
+                
+                # Status bezpiecznego obszaru
+                safe_status = "✅" if edge_data['is_inside_safe_area'] else "❌"
+                safe_color = "green" if edge_data['is_inside_safe_area'] else "red"
+                st.markdown(f"""
+                <div style="padding: 10px; border-left: 4px solid {safe_color}; background-color: #262730; margin: 15px 0;">
+                    <strong style="color: white;">W strefie bezpiecznej:</strong> {safe_status}
+                    <br><span style="font-size: 13px; color: #E0E0E0;">Marginesy: poziomy {margin_h_percent}% ({margin_h_px}px), pionowy {margin_v_percent}% ({margin_v_px}px)</span>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Odległości w pikselach
+                st.markdown("<div style='color: white;'><strong>Odległości od krawędzi (w pikselach):</strong></div>", unsafe_allow_html=True)
+                distances = edge_data['distances']
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Lewa", f"{distances['left']} px", delta=f"{distances['left']-margin_h_px} px", delta_color="normal", key=f"metric_px_left_{i}")
+                with col2:
+                    st.metric("Prawa", f"{distances['right']} px", delta=f"{distances['right']-margin_h_px} px", delta_color="normal", key=f"metric_px_right_{i}")
+                with col3:
+                    st.metric("Górna", f"{distances['top']} px", delta=f"{distances['top']-margin_v_px} px", delta_color="normal", key=f"metric_px_top_{i}")
+                with col4:
+                    st.metric("Dolna", f"{distances['bottom']} px", delta=f"{distances['bottom']-margin_v_px} px", delta_color="normal", key=f"metric_px_bottom_{i}")
+                
+                # Odległości procentowe
+                st.markdown("<div style='color: white;'><strong>Odległości od krawędzi (w procentach):</strong></div>", unsafe_allow_html=True)
+                percentages = edge_data['percentages']
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Lewa", f"{percentages['left']:.1f}%", delta=f"{percentages['left']-margin_h_percent:.1f}%", delta_color="normal", key=f"metric_pct_left_{i}")
+                with col2:
+                    st.metric("Prawa", f"{percentages['right']:.1f}%", delta=f"{percentages['right']-margin_h_percent:.1f}%", delta_color="normal", key=f"metric_pct_right_{i}")
+                with col3:
+                    st.metric("Górna", f"{percentages['top']:.1f}%", delta=f"{percentages['top']-margin_v_percent:.1f}%", delta_color="normal", key=f"metric_pct_top_{i}")
+                with col4:
+                    st.metric("Dolna", f"{percentages['bottom']:.1f}%", delta=f"{percentages['bottom']-margin_v_percent:.1f}%", delta_color="normal", key=f"metric_pct_bottom_{i}")
+    
+    # Zakładka problemów z kontrastem
+    with tabs[1]:
+        problematic_contrast = [r for r in regions_with_analysis if r['colors'] is None or not r['colors']['compliance']['AA_normal']]
+        
+        if not problematic_contrast:
+            st.success("Nie znaleziono problemów z kontrastem - wszystkie elementy spełniają wymagania WCAG AA.")
+        else:
+            st.error(f"Znaleziono {len(problematic_contrast)} element(ów) z problemami kontrastu:")
+            
+            for i, region_data in enumerate(problematic_contrast):
+                region = region_data['region']
+                color_data = region_data['colors']
+                
+                with st.expander(f"Problem {i+1}: {region['text']}", key=f"expander_contrast_{i}"):
+                    if color_data:
+                        st.markdown(f"""<div style='color: white;'><strong>Współczynnik kontrastu:</strong> {color_data['contrast_ratio']:.2f} (Wymagane minimum: 4.5)</div>""", unsafe_allow_html=True)
+                        
+                        # Sugestia poprawy
+                        st.markdown("<div style='color: white;'><strong>Sugestia poprawy:</strong></div>", unsafe_allow_html=True)
+                        st.markdown("<div style='color: white;'>Zwiększ kontrast między tekstem a tłem, stosując ciemniejszy tekst na jasnym tle lub jaśniejszy tekst na ciemnym tle.</div>", unsafe_allow_html=True)
+                    else:
+                        st.markdown("<div style='color: white;'><strong>Nie udało się wykryć kolorów dla tego elementu.</strong></div>", unsafe_allow_html=True)
+    
+    # Zakładka problemów z położeniem
+    with tabs[2]:
+        outside_elements = [r for r in regions_with_analysis if not r['edge']['is_inside_safe_area']]
+        
+        if not outside_elements:
+            st.success("Nie znaleziono elementów poza strefą bezpieczną.")
+        else:
+            st.error(f"Znaleziono {len(outside_elements)} element(ów) poza strefą bezpieczną:")
+            
+            for i, region_data in enumerate(outside_elements):
+                region = region_data['region']
+                edge_data = region_data['edge']
+                
+                with st.expander(f"Problem {i+1}: {region['text']}", key=f"expander_position_{i}"):
+                    distances = edge_data['distances']
+                    
+                    # Znajdź problematyczne krawędzie
+                    problem_edges = []
+                    if distances['left'] < margin_h_px:
+                        problem_edges.append(f"Lewa ({distances['left']} px, minimum: {margin_h_px} px)")
+                    if distances['right'] < margin_h_px:
+                        problem_edges.append(f"Prawa ({distances['right']} px, minimum: {margin_h_px} px)")
+                    if distances['top'] < margin_v_px:
+                        problem_edges.append(f"Górna ({distances['top']} px, minimum: {margin_v_px} px)")
+                    if distances['bottom'] < margin_v_px:
+                        problem_edges.append(f"Dolna ({distances['bottom']} px, minimum: {margin_v_px} px)")
+                    
+                    st.markdown(f"""<div style='color: white;'><strong>Zbyt mała odległość od krawędzi:</strong> {', '.join(problem_edges)}</div>""", unsafe_allow_html=True)
+                    
+                    # Sugestia poprawy
+                    st.markdown("<div style='color: white;'><strong>Sugestia poprawy:</strong></div>", unsafe_allow_html=True)
+                    st.markdown(f"""<div style='color: white;'>Przesuń element aby znajdował się całkowicie w strefie bezpiecznej (marginesy: poziomy {margin_h_px}px, pionowy {margin_v_px}px).</div>""", unsafe_allow_html=True)
+
+# Główna aplikacja Streamlit
+def main():
+    st.title("Analiza Dostępności Grafiki - WCAG")
+    
+    # Sidebar z opcjami
+    st.sidebar.header("Opcje analizy")
+    
+    # Opcje języka dla OCR
+    languages = st.sidebar.multiselect(
+        "Języki OCR",
+        options=["pl", "en", "de", "fr", "es", "it"],
+        default=["en"],  # Domyślnie tylko angielski dla szybszego ładowania
+        key="ocr_languages"
+    )
+    
+    # Ustawienia marginesów
+    st.sidebar.subheader("Bezpieczny obszar")
+    
+    # Domyślny margines 10% dla szerokości i wysokości
+    margin_h_percent = st.sidebar.slider(
+        "Margines poziomy (%)",
+        1, 25, 10,
+        help="Minimalny odstęp od lewej i prawej krawędzi jako procent szerokości obrazu",
+        key="margin_h_slider"
+    )
+    
+    margin_v_percent = st.sidebar.slider(
+        "Margines pionowy (%)",
+        1, 25, 10,
+        help="Minimalny odstęp od górnej i dolnej krawędzi jako procent wysokości obrazu",
+        key="margin_v_slider"
+    )
+    
+    # Upload pliku
+    uploaded_file = st.file_uploader("Wybierz plik graficzny", type=["png", "jpg", "jpeg"], key="file_uploader")
+    
+    if uploaded_file is not None:
+        # Wczytaj obraz
+        pil_image = Image.open(uploaded_file)
+        
+        # Konwersja do formatu OpenCV (BGR)
+        cv_image = np.array(pil_image)
+        if len(cv_image.shape) == 2:  # Jeśli obraz jest w skali szarości
+            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_GRAY2BGR)
+        elif len(cv_image.shape) == 3 and cv_image.shape[2] == 4:  # Jeśli obraz ma kanał alfa (RGBA)
+            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGBA2BGR)
+        elif len(cv_image.shape) == 3 and cv_image.shape[2] == 3:  # RGB
+            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
+        
+        # Wyświetl oryginalny obraz
+        st.image(pil_image, caption="Wgrana grafika", use_container_width=True)
+        
+        # Oblicz marginesy w pikselach na podstawie wymiarów obrazu
+        height, width = cv_image.shape[:2]
+        margin_h_px = int((width * margin_h_percent) / 100)
+        margin_v_px = int((height * margin_v_percent) / 100)
+        
+        # Wyświetl informację o marginesach
+        st.info(f"Bezpieczny obszar: margines poziomy {margin_h_percent}% ({margin_h_px}px), margines pionowy {margin_v_percent}% ({margin_v_px}px)")
+        
+        # Automatyczne wykrywanie tekstu
+        with st.spinner("Inicjalizacja PaddleOCR i wykrywanie tekstu..."):
+            # Inicjalizacja czytnika OCR
+            reader = load_ocr_reader(languages)
+            
+            if reader:
+                # Wykrywanie tekstu
+                regions = detect_text_paddleocr(cv_image, reader)
+                
+                if not regions:
+                    st.warning("Nie wykryto tekstu. Sprawdź czy obraz zawiera wyraźny tekst.")
+                    # Pokaż tylko strefy bezpieczne jeśli nie wykryto tekstu
+                    show_safety_margin(cv_image, margin_h_px, margin_v_px)
+            else:
+                st.error("Nie udało się zainicjalizować PaddleOCR.")
+                regions = []
+                # Pokaż tylko strefy bezpieczne jeśli nie ma OCR
+                show_safety_margin(cv_image, margin_h_px, margin_v_px)
+        
+        # Sprawdzanie czy mamy regiony tekstu do analizy
+        if regions:
+            with st.spinner("Analiza obszarów..."):
+                regions_with_analysis = []
+                
+                for region in regions:
+                    # Analizuj kolory używając nowego podejścia
+                    color_data = sample_colors_from_region(cv_image, region)
+                    
+                    # Sprawdź odległość od krawędzi
+                    edge_data = check_edge_distance(cv_image.shape, region, margin_h_px, margin_v_px)
+                    
+                    regions_with_analysis.append({
+                        'region': region,
+                        'colors': color_data,
+                        'edge': edge_data
+                    })
+                
+                # Wizualizuj wyniki z bezpiecznym obszarem i nowym podejściem do kolorów
+                result_image = visualize_results(cv_image, regions_with_analysis, margin_h_px, margin_v_px)
+                
+                # Wyświetl wyniki
+                st.subheader("Wyniki analizy")
+                st.image(result_image, caption="Analiza dostępności", use_container_width=True)
+                
+                # Reszta kodu do wyświetlania wyników...
+                show_analysis_results(regions_with_analysis, margin_h_percent, margin_v_percent, margin_h_px, margin_v_px)
 
 if __name__ == "__main__":
     main()

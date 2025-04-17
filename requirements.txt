@@ -4,6 +4,5 @@ matplotlib
 Pillow
 opencv-python-headless
 scikit-learn
-easyocr
-torch
-torchvision
+paddlepaddle
+paddleocr
