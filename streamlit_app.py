@@ -13,7 +13,7 @@ os.environ["FLAGS_allocator_strategy"] = 'auto_growth'  # Optymalizacja pamięci
 
 # Inicjalizacja czytnika PaddleOCR z użyciem cache
 @st.cache_resource(show_spinner=False)
-def load_ocr_reader(languages=['pl', 'en']):
+def load_ocr_reader(languages=['pl']):
     """
     Próbuje załadować czytnik PaddleOCR. Zwraca None w przypadku niepowodzenia.
     """
@@ -26,14 +26,14 @@ def load_ocr_reader(languages=['pl', 'en']):
             lang_map = {
                 'en': 'en',
                 'pl': 'pl',
-                'de': 'de',
-                'fr': 'fr',
-                'es': 'es',
-                'it': 'it'
+                'de': 'german',
+                'fr': 'french',
+                'es': 'spanish',
+                'it': 'italian'
             }
             
-            # Wybieramy pierwszy dostępny język lub domyślnie angielski
-            lang = next((lang_map[l] for l in languages if l in lang_map), 'en')
+            # Wybieramy pierwszy dostępny język lub domyślnie polski
+            lang = next((lang_map[l] for l in languages if l in lang_map), 'pl')
             
             # Inicjalizacja PaddleOCR z lekkim modelem
             ocr = PaddleOCR(
@@ -553,7 +553,8 @@ def show_analysis_results(regions_with_analysis, margin_h_percent, margin_v_perc
             
             status_icon = "✅" if (color_data and color_data['compliance']['AA_normal'] and edge_data['is_inside_safe_area']) else "❌"
             
-            with st.expander(f"{status_icon} Element {i+1}: {region['text']}", key=f"expander_all_{i}"):
+            # Usunięto argument key z expander
+            with st.expander(f"{status_icon} Element {i+1}: {region['text']}"):
                 # Dodaj opcję ręcznej korekty kolorów
                 if color_data:
                     # Kolorowa ramka dla wartości kontrastu
@@ -614,7 +615,7 @@ def show_analysis_results(regions_with_analysis, margin_h_percent, margin_v_perc
                     # Ręczna korekta kolorów
                     st.markdown("<div style='color: white;'><strong>Ręczna korekta kolorów:</strong></div>", unsafe_allow_html=True)
                     
-                    # Użyj color pickerów do ręcznej korekty
+                    # Użyj color pickerów do ręcznej korekty - każdy z unikalnym kluczem
                     col1, col2 = st.columns(2)
                     with col1:
                         manual_fg = st.color_picker("Skoryguj kolor tekstu", fg_hex, key=f"fg_{i}")
@@ -623,7 +624,6 @@ def show_analysis_results(regions_with_analysis, margin_h_percent, margin_v_perc
                     
                     # Oblicz nowy kontrast dla ręcznie skorygowanych kolorów
                     # Konwersja z HEX do RGB
-                    import re
                     def hex_to_rgb(hex_color):
                         hex_color = hex_color.lstrip('#')
                         return [int(hex_color[i:i+2], 16) for i in (0, 2, 4)]
@@ -660,26 +660,26 @@ def show_analysis_results(regions_with_analysis, margin_h_percent, margin_v_perc
                 distances = edge_data['distances']
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Lewa", f"{distances['left']} px", delta=f"{distances['left']-margin_h_px} px", delta_color="normal", key=f"metric_px_left_{i}")
+                    st.metric("Lewa", f"{distances['left']} px", delta=f"{distances['left']-margin_h_px} px", delta_color="normal")
                 with col2:
-                    st.metric("Prawa", f"{distances['right']} px", delta=f"{distances['right']-margin_h_px} px", delta_color="normal", key=f"metric_px_right_{i}")
+                    st.metric("Prawa", f"{distances['right']} px", delta=f"{distances['right']-margin_h_px} px", delta_color="normal")
                 with col3:
-                    st.metric("Górna", f"{distances['top']} px", delta=f"{distances['top']-margin_v_px} px", delta_color="normal", key=f"metric_px_top_{i}")
+                    st.metric("Górna", f"{distances['top']} px", delta=f"{distances['top']-margin_v_px} px", delta_color="normal")
                 with col4:
-                    st.metric("Dolna", f"{distances['bottom']} px", delta=f"{distances['bottom']-margin_v_px} px", delta_color="normal", key=f"metric_px_bottom_{i}")
+                    st.metric("Dolna", f"{distances['bottom']} px", delta=f"{distances['bottom']-margin_v_px} px", delta_color="normal")
                 
                 # Odległości procentowe
                 st.markdown("<div style='color: white;'><strong>Odległości od krawędzi (w procentach):</strong></div>", unsafe_allow_html=True)
                 percentages = edge_data['percentages']
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Lewa", f"{percentages['left']:.1f}%", delta=f"{percentages['left']-margin_h_percent:.1f}%", delta_color="normal", key=f"metric_pct_left_{i}")
+                    st.metric("Lewa", f"{percentages['left']:.1f}%", delta=f"{percentages['left']-margin_h_percent:.1f}%", delta_color="normal")
                 with col2:
-                    st.metric("Prawa", f"{percentages['right']:.1f}%", delta=f"{percentages['right']-margin_h_percent:.1f}%", delta_color="normal", key=f"metric_pct_right_{i}")
+                    st.metric("Prawa", f"{percentages['right']:.1f}%", delta=f"{percentages['right']-margin_h_percent:.1f}%", delta_color="normal")
                 with col3:
-                    st.metric("Górna", f"{percentages['top']:.1f}%", delta=f"{percentages['top']-margin_v_percent:.1f}%", delta_color="normal", key=f"metric_pct_top_{i}")
+                    st.metric("Górna", f"{percentages['top']:.1f}%", delta=f"{percentages['top']-margin_v_percent:.1f}%", delta_color="normal")
                 with col4:
-                    st.metric("Dolna", f"{percentages['bottom']:.1f}%", delta=f"{percentages['bottom']-margin_v_percent:.1f}%", delta_color="normal", key=f"metric_pct_bottom_{i}")
+                    st.metric("Dolna", f"{percentages['bottom']:.1f}%", delta=f"{percentages['bottom']-margin_v_percent:.1f}%", delta_color="normal")
     
     # Zakładka problemów z kontrastem
     with tabs[1]:
@@ -694,7 +694,7 @@ def show_analysis_results(regions_with_analysis, margin_h_percent, margin_v_perc
                 region = region_data['region']
                 color_data = region_data['colors']
                 
-                with st.expander(f"Problem {i+1}: {region['text']}", key=f"expander_contrast_{i}"):
+                with st.expander(f"Problem {i+1}: {region['text']}"):
                     if color_data:
                         st.markdown(f"""<div style='color: white;'><strong>Współczynnik kontrastu:</strong> {color_data['contrast_ratio']:.2f} (Wymagane minimum: 4.5)</div>""", unsafe_allow_html=True)
                         
@@ -717,7 +717,7 @@ def show_analysis_results(regions_with_analysis, margin_h_percent, margin_v_perc
                 region = region_data['region']
                 edge_data = region_data['edge']
                 
-                with st.expander(f"Problem {i+1}: {region['text']}", key=f"expander_position_{i}"):
+                with st.expander(f"Problem {i+1}: {region['text']}"):
                     distances = edge_data['distances']
                     
                     # Znajdź problematyczne krawędzie
@@ -744,11 +744,11 @@ def main():
     # Sidebar z opcjami
     st.sidebar.header("Opcje analizy")
     
-    # Opcje języka dla OCR
+    # Opcje języka dla OCR - domyślnie tylko polski
     languages = st.sidebar.multiselect(
         "Języki OCR",
         options=["pl", "en", "de", "fr", "es", "it"],
-        default=["en"],  # Domyślnie tylko angielski dla szybszego ładowania
+        default=["pl"],  # Domyślnie tylko polski
         key="ocr_languages"
     )
     
