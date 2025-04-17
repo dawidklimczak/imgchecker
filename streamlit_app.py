@@ -7,12 +7,13 @@ from matplotlib.colors import rgb2hex
 from sklearn.cluster import KMeans
 import os
 import time
+import gc
 
-# Ustaw zmienną środowiskową dla czasowego katalogu modeli
+# Konfiguracja środowiska
 os.environ["FLAGS_allocator_strategy"] = 'auto_growth'  # Optymalizacja pamięci dla PaddleOCR
 
-# Inicjalizacja czytnika PaddleOCR z użyciem cache
-@st.cache_resource(show_spinner=False)
+# Funkcja inicjalizująca OCR - z parametrem ttl i limitami pamięci
+@st.cache_resource(show_spinner=False, ttl=300)  # 5 minut czasu życia cache
 def load_ocr_reader(languages=['pl']):
     """
     Próbuje załadować czytnik PaddleOCR. Zwraca None w przypadku niepowodzenia.
@@ -37,14 +38,17 @@ def load_ocr_reader(languages=['pl']):
             
             # Inicjalizacja PaddleOCR z lekkim modelem
             ocr = PaddleOCR(
-                use_angle_cls=True,  # Wykrywanie orientacji tekstu
-                lang=lang,           # Język rozpoznawania
-                use_gpu=False,       # Brak GPU w Streamlit Cloud
-                show_log=False,      # Wyłączenie logów
-                use_mp=True,         # Wielowątkowość dla szybszego przetwarzania
-                enable_mkldnn=True,  # Optymalizacja CPU
-                use_tensorrt=False,  # Wyłączenie TensorRT (nie jest dostępne w Streamlit Cloud)
-                cpu_threads=4        # Liczba wątków CPU
+                use_angle_cls=True,      # Wykrywanie orientacji tekstu
+                lang=lang,               # Język rozpoznawania
+                use_gpu=False,           # Brak GPU w Streamlit Cloud
+                show_log=False,          # Wyłączenie logów
+                use_mp=True,             # Wielowątkowość dla szybszego przetwarzania
+                enable_mkldnn=True,      # Optymalizacja CPU
+                use_tensorrt=False,      # Wyłączenie TensorRT (nie jest dostępne w Streamlit Cloud)
+                cpu_threads=2,           # Mniej wątków dla oszczędności pamięci
+                det_db_thresh=0.3,       # Niższy próg detekcji
+                det_db_box_thresh=0.5,   # Niższy próg dla bounding boxów
+                det_limit_side_len=960   # Ograniczenie rozmiaru obrazu
             )
             return ocr
     except Exception as e:
@@ -53,60 +57,78 @@ def load_ocr_reader(languages=['pl']):
         st.error(traceback.format_exc())
         return None
 
-# Funkcja do detekcji tekstu za pomocą PaddleOCR
-def detect_text_paddleocr(image, ocr):
+# Funkcja do detekcji tekstu z mechanizmem ponownych prób
+def detect_text_paddleocr(image, ocr, max_retries=3):
     """
-    Wykrywa tekst na obrazie za pomocą PaddleOCR.
+    Wykrywa tekst na obrazie za pomocą PaddleOCR z mechanizmem ponownych prób.
     """
     # Sprawdzamy czy czytnik OCR jest dostępny
     if ocr is None:
         st.warning("Rozpoznawanie tekstu nie jest dostępne.")
         return []
     
-    try:
-        # Konwersja obrazu do formatu wymaganego przez PaddleOCR
-        if isinstance(image, Image.Image):
-            img_array = np.array(image)
-        else:
-            img_array = image
-        
-        # Detekcja tekstu
-        with st.spinner("Wykrywanie tekstu na obrazie..."):
-            results = ocr.ocr(img_array, cls=True)
+    # Implementacja mechanizmu ponownych prób
+    for attempt in range(max_retries):
+        try:
+            # Konwersja obrazu do formatu wymaganego przez PaddleOCR
+            if isinstance(image, Image.Image):
+                img_array = np.array(image)
+            else:
+                img_array = image
             
-            # Przetwarzamy wyniki
-            text_regions = []
-            
-            # PaddleOCR zwraca wyniki dla każdej strony (zwykle jednej)
-            for page_result in results:
-                if not page_result:  # Pusta strona
-                    continue
-                    
-                for result in page_result:
-                    # PaddleOCR zwraca [[x1,y1], [x2,y2], [x3,y3], [x4,y4]], tekst, pewność
-                    box = result[0]
-                    text = result[1][0]  # Tekst
-                    confidence = result[1][1] * 100  # Pewność w procentach
-                    
-                    # Konwersja do formatu (x, y, x+w, y+h)
-                    x_min = min(point[0] for point in box)
-                    y_min = min(point[1] for point in box)
-                    x_max = max(point[0] for point in box)
-                    y_max = max(point[1] for point in box)
-                    
-                    text_regions.append({
-                        'text': text,
-                        'bbox': (int(x_min), int(y_min), int(x_max), int(y_max)),
-                        'confidence': confidence
-                    })
-            
-            return text_regions
-            
-    except Exception as e:
-        st.error(f"Błąd podczas detekcji tekstu: {e}")
-        import traceback
-        st.error(traceback.format_exc())
-        return []
+            # Detekcja tekstu
+            with st.spinner(f"Wykrywanie tekstu na obrazie (próba {attempt+1}/{max_retries})..."):
+                # Jawne zwolnienie pamięci przed wykrywaniem
+                gc.collect()
+                
+                # Wykonaj detekcję tekstu
+                results = ocr.ocr(img_array, cls=True)
+                
+                # Przetwarzamy wyniki
+                text_regions = []
+                
+                # PaddleOCR zwraca wyniki dla każdej strony (zwykle jednej)
+                for page_result in results:
+                    if not page_result:  # Pusta strona
+                        continue
+                        
+                    for result in page_result:
+                        # PaddleOCR zwraca [[x1,y1], [x2,y2], [x3,y3], [x4,y4]], tekst, pewność
+                        box = result[0]
+                        text = result[1][0]  # Tekst
+                        confidence = result[1][1] * 100  # Pewność w procentach
+                        
+                        # Konwersja do formatu (x, y, x+w, y+h)
+                        x_min = min(point[0] for point in box)
+                        y_min = min(point[1] for point in box)
+                        x_max = max(point[0] for point in box)
+                        y_max = max(point[1] for point in box)
+                        
+                        text_regions.append({
+                            'text': text,
+                            'bbox': (int(x_min), int(y_min), int(x_max), int(y_max)),
+                            'confidence': confidence
+                        })
+                
+                # Wykonane pomyślnie - zwróć wyniki
+                return text_regions
+                
+        except Exception as e:
+            # Jeśli to nie ostatnia próba, spróbuj ponownie
+            if attempt < max_retries - 1:
+                # Czekaj z opadającym opóźnieniem przed kolejną próbą
+                wait_time = 1 * (2 ** attempt)
+                st.warning(f"Problem z detekcją tekstu, ponawiam za {wait_time}s...")
+                time.sleep(wait_time)
+                
+                # Spróbuj zwolnić zasoby
+                gc.collect()
+            else:
+                # Wszystkie próby nieudane
+                st.error(f"Błąd podczas detekcji tekstu po {max_retries} próbach: {e}")
+                import traceback
+                st.error(traceback.format_exc())
+                return []
 
 # Funkcja do obliczenia współczynnika kontrastu WCAG
 def calculate_contrast_ratio(color1, color2):
@@ -139,9 +161,12 @@ def check_wcag_compliance(contrast_ratio):
         'AAA_large': aaa_large_text
     }
 
-# NOWE PODEJŚCIE: Pobieranie i analiza kolorów z próbek
+# ULEPSZONE PODEJŚCIE: Pobieranie i analiza kolorów z próbek z uwzględnieniem proporcji pikseli
 def sample_colors_from_region(image, region, num_samples=10):
-    """Pobiera próbki kolorów z różnych części regionu i analizuje je statystycznie."""
+    """
+    Pobiera próbki kolorów z różnych części regionu i analizuje je statystycznie.
+    Wykorzystuje zarówno luminancję jak i proporcję pikseli do określenia tła i tekstu.
+    """
     x1, y1, x2, y2 = region['bbox']
     
     # Upewnij się, że współrzędne są w granicach obrazu
@@ -197,14 +222,24 @@ def sample_colors_from_region(image, region, num_samples=10):
     lum1 = get_luminance(color1)
     lum2 = get_luminance(color2)
     
-    # Przypisz jaśniejszy kolor jako tło, a ciemniejszy jako tekst
-    # Typowo tekst jest ciemniejszy niż tło
-    if lum1 > lum2:
-        background_color = color1
-        foreground_color = color2
+    # Ustal próg dominacji – jeśli większy klaster stanowi określony odsetek pikseli, przyjmujemy go jako tło
+    total_pixels = len(pixels)
+    dominant_threshold = 0.7  # 70%
+    ratio_dominant = counts[sorted_indices[0]] / total_pixels
+    
+    # Określanie tła i tekstu na podstawie zarówno proporcji jak i luminancji
+    if ratio_dominant >= dominant_threshold:
+        # Jeśli jeden kolor dominuje, przyjmujemy go jako tło niezależnie od jasności
+        background_color = color1  # większy klaster to tło
+        foreground_color = color2  # mniejszy klaster to tekst
     else:
-        background_color = color2
-        foreground_color = color1
+        # Jeśli nie ma wyraźnej dominacji, porównujemy luminancję
+        if lum1 > lum2:
+            background_color = color1
+            foreground_color = color2
+        else:
+            background_color = color2
+            foreground_color = color1
     
     # Oblicz współczynnik kontrastu
     contrast_ratio = calculate_contrast_ratio(foreground_color, background_color)
@@ -217,7 +252,8 @@ def sample_colors_from_region(image, region, num_samples=10):
         'foreground': foreground_color,
         'background': background_color,
         'contrast_ratio': contrast_ratio,
-        'compliance': compliance
+        'compliance': compliance,
+        'ratio_dominant': ratio_dominant  # Dodajemy informację o proporcji dominującego koloru
     }
     
     return samples
@@ -275,8 +311,7 @@ def check_edge_distance(image_shape, region, margin_h_px, margin_v_px):
 # Funkcja do wizualizacji wyników
 def visualize_results(original_image, regions_with_analysis, margin_h_px, margin_v_px):
     """
-    Nowe podejście do wizualizacji: tworzymy nową warstwę z oznaczeniami, 
-    ale zachowujemy oryginalne kolory obrazu.
+    Wizualizuje wyniki analizy na obrazie.
     """
     try:
         # Stwórz kopię obrazu do wizualizacji
@@ -312,9 +347,6 @@ def visualize_results(original_image, regions_with_analysis, margin_h_px, margin
         # Prawa linia
         overlay[safe_y1-1:safe_y2+1, safe_x2-1:safe_x2+1] = [255, 255, 255, 200]
         
-        # Dodaj etykietę bezpiecznego obszaru
-        # OpenCV nie obsługuje przezroczystości, więc dodamy tekst bezpośrednio do finalnego obrazu później
-        
         # Zaznacz regiony tekstowe
         for region_data in regions_with_analysis:
             region = region_data['region']
@@ -344,9 +376,6 @@ def visualize_results(original_image, regions_with_analysis, margin_h_px, margin
             overlay[y1-1:y2+1, x1-1:x1+1] = box_color
             # Prawa linia
             overlay[y1-1:y2+1, x2-1:x2+1] = box_color
-            
-            # Dodaj informację o współczynniku kontrastu
-            # OpenCV nie obsługuje przezroczystości, więc dodamy tekst bezpośrednio do finalnego obrazu później
         
         # Połącz warstwę oznaczeń z oryginalnym obrazem
         # Konwertuj overlay do formatu PIL
@@ -553,15 +582,21 @@ def show_analysis_results(regions_with_analysis, margin_h_percent, margin_v_perc
             
             status_icon = "✅" if (color_data and color_data['compliance']['AA_normal'] and edge_data['is_inside_safe_area']) else "❌"
             
-            # Usunięto argument key z expander
+            # Usunięto argument key z expander, który powodował problemy
             with st.expander(f"{status_icon} Element {i+1}: {region['text']}"):
                 # Dodaj opcję ręcznej korekty kolorów
                 if color_data:
+                    # Dodaj informację o proporcji pikseli jeśli dostępna
+                    ratio_info = ""
+                    if 'ratio_dominant' in color_data:
+                        ratio_percent = color_data['ratio_dominant'] * 100
+                        ratio_info = f" (dominujący kolor: {ratio_percent:.1f}%)"
+                        
                     # Kolorowa ramka dla wartości kontrastu
                     contrast_color = "green" if color_data['compliance']['AAA_normal'] else ("blue" if color_data['compliance']['AA_normal'] else "red")
                     st.markdown(f"""
                     <div style="padding: 10px; border-left: 4px solid {contrast_color}; background-color: #262730; margin-bottom: 10px;">
-                        <strong style="color: white;">Współczynnik kontrastu:</strong> <span style="font-size: 16px; font-weight: bold; color: white;">{color_data['contrast_ratio']:.2f}</span>
+                        <strong style="color: white;">Współczynnik kontrastu:</strong> <span style="font-size: 16px; font-weight: bold; color: white;">{color_data['contrast_ratio']:.2f}</span>{ratio_info}
                         <br><span style="font-size: 13px; color: #E0E0E0;">Minimum dla WCAG AA: 4.5, dla WCAG AAA: 7.0</span>
                     </div>
                     """, unsafe_allow_html=True)
@@ -773,18 +808,44 @@ def main():
     # Upload pliku
     uploaded_file = st.file_uploader("Wybierz plik graficzny", type=["png", "jpg", "jpeg"], key="file_uploader")
     
+    # Inicjalizacja zmiennych stanu sesji jeśli nie istnieją
+    if 'previous_file' not in st.session_state:
+        st.session_state.previous_file = None
+        st.session_state.previous_margins = (0, 0)
+        st.session_state.detected_regions = None
+        st.session_state.cv_image = None
+    
     if uploaded_file is not None:
-        # Wczytaj obraz
-        pil_image = Image.open(uploaded_file)
+        # Sprawdź, czy plik został zmieniony
+        file_changed = st.session_state.previous_file is None or uploaded_file.name != st.session_state.previous_file
         
-        # Konwersja do formatu OpenCV (BGR)
-        cv_image = np.array(pil_image)
-        if len(cv_image.shape) == 2:  # Jeśli obraz jest w skali szarości
-            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_GRAY2BGR)
-        elif len(cv_image.shape) == 3 and cv_image.shape[2] == 4:  # Jeśli obraz ma kanał alfa (RGBA)
-            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGBA2BGR)
-        elif len(cv_image.shape) == 3 and cv_image.shape[2] == 3:  # RGB
-            cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
+        # Sprawdź, czy marginesy zostały zmienione
+        margins_changed = not file_changed and (st.session_state.previous_margins != (margin_h_percent, margin_v_percent))
+        
+        # Aktualizacja stanu sesji
+        st.session_state.previous_file = uploaded_file.name
+        st.session_state.previous_margins = (margin_h_percent, margin_v_percent)
+        
+        # Wczytaj obraz tylko jeśli się zmienił
+        if file_changed:
+            # Wczytaj obraz
+            pil_image = Image.open(uploaded_file)
+            
+            # Konwersja do formatu OpenCV (BGR)
+            cv_image = np.array(pil_image)
+            if len(cv_image.shape) == 2:  # Jeśli obraz jest w skali szarości
+                cv_image = cv2.cvtColor(cv_image, cv2.COLOR_GRAY2BGR)
+            elif len(cv_image.shape) == 3 and cv_image.shape[2] == 4:  # Jeśli obraz ma kanał alfa (RGBA)
+                cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGBA2BGR)
+            elif len(cv_image.shape) == 3 and cv_image.shape[2] == 3:  # RGB
+                cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
+            
+            # Zapisz obraz w stanie sesji
+            st.session_state.cv_image = cv_image
+        else:
+            # Użyj zapisanego obrazu
+            cv_image = st.session_state.cv_image
+            pil_image = Image.open(uploaded_file)
         
         # Wyświetl oryginalny obraz
         st.image(pil_image, caption="Wgrana grafika", use_container_width=True)
@@ -797,24 +858,30 @@ def main():
         # Wyświetl informację o marginesach
         st.info(f"Bezpieczny obszar: margines poziomy {margin_h_percent}% ({margin_h_px}px), margines pionowy {margin_v_percent}% ({margin_v_px}px)")
         
-        # Automatyczne wykrywanie tekstu
-        with st.spinner("Inicjalizacja PaddleOCR i wykrywanie tekstu..."):
-            # Inicjalizacja czytnika OCR
-            reader = load_ocr_reader(languages)
-            
-            if reader:
-                # Wykrywanie tekstu
-                regions = detect_text_paddleocr(cv_image, reader)
+        # Automatyczne wykrywanie tekstu - tylko gdy plik się zmienił
+        if file_changed:
+            with st.spinner("Inicjalizacja PaddleOCR i wykrywanie tekstu..."):
+                # Inicjalizacja czytnika OCR
+                reader = load_ocr_reader(languages)
                 
-                if not regions:
-                    st.warning("Nie wykryto tekstu. Sprawdź czy obraz zawiera wyraźny tekst.")
-                    # Pokaż tylko strefy bezpieczne jeśli nie wykryto tekstu
+                if reader:
+                    # Wykrywanie tekstu
+                    regions = detect_text_paddleocr(cv_image, reader, max_retries=3)
+                    st.session_state.detected_regions = regions
+                    
+                    if not regions:
+                        st.warning("Nie wykryto tekstu. Sprawdź czy obraz zawiera wyraźny tekst.")
+                        # Pokaż tylko strefy bezpieczne jeśli nie wykryto tekstu
+                        show_safety_margin(cv_image, margin_h_px, margin_v_px)
+                else:
+                    st.error("Nie udało się zainicjalizować PaddleOCR.")
+                    regions = []
+                    st.session_state.detected_regions = []
+                    # Pokaż tylko strefy bezpieczne jeśli nie ma OCR
                     show_safety_margin(cv_image, margin_h_px, margin_v_px)
-            else:
-                st.error("Nie udało się zainicjalizować PaddleOCR.")
-                regions = []
-                # Pokaż tylko strefy bezpieczne jeśli nie ma OCR
-                show_safety_margin(cv_image, margin_h_px, margin_v_px)
+        else:
+            # Użyj zapisanych regionów
+            regions = st.session_state.detected_regions
         
         # Sprawdzanie czy mamy regiony tekstu do analizy
         if regions:
@@ -822,7 +889,7 @@ def main():
                 regions_with_analysis = []
                 
                 for region in regions:
-                    # Analizuj kolory używając nowego podejścia
+                    # Analizuj kolory używając ulepszonego podejścia z proporcją pikseli
                     color_data = sample_colors_from_region(cv_image, region)
                     
                     # Sprawdź odległość od krawędzi
@@ -841,7 +908,7 @@ def main():
                 st.subheader("Wyniki analizy")
                 st.image(result_image, caption="Analiza dostępności", use_container_width=True)
                 
-                # Reszta kodu do wyświetlania wyników...
+                # Reszta kodu do wyświetlania wyników
                 show_analysis_results(regions_with_analysis, margin_h_percent, margin_v_percent, margin_h_px, margin_v_px)
 
 if __name__ == "__main__":
